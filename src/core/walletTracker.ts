@@ -7,7 +7,7 @@ import {
   MintWithOwnersResponse,
   SplTokenHolding,
 } from "./types";
-import { checkMultipleOwnersForMint } from "./db";
+import { checkMultipleOwnersForMint } from "../database/db";
 
 export async function getWalletTokenHoldings(walletAddress: string): Promise<GetWalletTokenHoldingsResponse> {
   try {

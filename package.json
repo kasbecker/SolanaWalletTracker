@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
+    "dev": "tsx watch src/core/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "start:tracker": "ts-node src/index.ts",
-    "test": "ts-node src/test.ts",
-    "clean": "rm -rf dist"
+    "start": "node dist/core/index.js",
+    "start:api": "node dist/api/server.js",
+    "test": "jest",
+    "db:migrate": "node dist/database/migrations/run.js",
+    "copy-trade": "node dist/services/TradingEngine.js"
   },
   "keywords": [],
   "author": "https://x.com/digbenjamins",
@@ -26,12 +28,13 @@
   "dependencies": {
     "@project-serum/anchor": "^0.26.0",
     "@solana/web3.js": "^1.95.5",
-    "axios": "^1.7.8",
+    "axios": "^1.11.0",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
     "luxon": "^3.5.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
+    "winston": "^3.17.0",
     "ws": "^8.18.0"
   }
 }

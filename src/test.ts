@@ -1,5 +1,5 @@
-import { checkMultipleOwnersForMint } from "./db";
-import { getDoubleHoldings } from "./walletTracker";
+import { checkMultipleOwnersForMint } from "./database/db";
+import { getDoubleHoldings } from "./core/walletTracker";
 
 // Tests
 (async () => {
