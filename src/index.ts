@@ -1,4 +1,4 @@
-// src/index.ts - Fixed with correct import names
+// src/index.ts - Enhanced with copy trading integration
 import { PublicKey } from "@solana/web3.js";
 import WebSocket from "ws";
 import * as dotenv from "dotenv";
@@ -8,12 +8,12 @@ import {
     GetWalletTokenHoldingsResponse,
     MintWithOwnersResponse,
     SplTokenHolding,
-    SplTokenStoreResponse,
+    SplTokenStoreReponse,
     WalletConfig,
 } from "./types";
 import { config } from "./config";
 import { clearHoldingsTable, updateHoldings } from "./db";
-import { logger } from "./utils/logger";
+import { detectTrades, shouldExecuteCopyTrade, logCopyTradeOpportunity } from "./copyTrading";
 
 // Load env variables
 dotenv.config();
@@ -24,8 +24,7 @@ const SUBSCRIBE_WALLETS = config.wallets;
 // Create utility functions
 const saveLogTo = (logsArray: string[], ...args: unknown[]): void => {
     const message = args.map((arg) => String(arg)).join(" ");
-    logsArray.unshift(`[${new Date().toISOString().slice(11, 19)}] ${message}`);
-    if (logsArray.length > 50) logsArray.splice(50);
+    logsArray[logsArray.length] = message;
 };
 
 function shortenAddress(address: string): string {
@@ -34,35 +33,52 @@ function shortenAddress(address: string): string {
     return `${start}...${end}`;
 }
 
-// Create logging arrays
+// Create Action and holdings Log constant
 const actionsLogs: string[] = [];
 let duplicateLogs: string[] = [];
 const holdingLogs = new Map<string, string>();
 
 function showLogs() {
+    console.log("\n".repeat(100));
     console.clear();
-    console.log(`💼 Solana Wallet Tracker`);
-    console.log("=".repeat(80));
+    console.log(`💼 Solana Wallet Tracker ${process.env.COPY_TRADING_ENABLED === 'true' ? '+ Copy Trading' : ''}`);
+    console.log("================================================================================");
 
     if (SUBSCRIBE_WALLETS.length === 0) {
-        console.log("🔎 No wallets configured");
-    } else {
-        Array.from(holdingLogs.values()).forEach(log => console.log(log));
+        console.log("🔎 No wallets to track at this moment: ", new Date().toISOString());
     }
 
-    console.log("\n🔥 Duplicate Holdings");
-    console.log("=".repeat(80));
-    duplicateLogs.slice(0, 10).forEach(log => console.log(log));
+    const holdingLogsArray = Array.from(holdingLogs.entries())
+        .map(([walletAddress, msg]) => msg)
+        .join("\n");
+    console.log(holdingLogsArray);
 
-    console.log("\n📜 Action Logs");
-    console.log("=".repeat(80));
-    actionsLogs.slice(0, 15).forEach(log => console.log(log));
+    // Output Copy Trading Status
+    if (process.env.COPY_TRADING_ENABLED === 'true') {
+        console.log("\n🤖 Copy Trading Status");
+        console.log("================================================================================");
+        const copyEnabledWallets = SUBSCRIBE_WALLETS.filter(w => w.copyEnabled);
+        if (copyEnabledWallets.length > 0) {
+            copyEnabledWallets.forEach(wallet => {
+                console.log(`🎯 Copying: ${wallet.name} ${wallet.emoji} (${(wallet.copyMultiplier || 0.1) * 100}%)`);
+            });
+        } else {
+            console.log("⚠️ No wallets enabled for copy trading");
+        }
+    }
 
-    console.log("\n" + "=".repeat(80));
-    console.log(`⏰ Last updated: ${new Date().toLocaleString()}`);
+    // Output Duplicates
+    console.log("\n\n🔥 Duplicate holdings");
+    console.log("================================================================================");
+    console.log(duplicateLogs.slice().reverse().join("\n"));
+
+    // Output Action Logs
+    console.log("\n\n📜 Action Logs");
+    console.log("================================================================================");
+    console.log(actionsLogs.slice().reverse().join("\n"));
 }
 
-// Main functionality
+// Main function to fetch token holdings for provided wallets
 let firstRun = true;
 async function fetchHoldings(walletToSync?: string): Promise<void> {
     try {
@@ -70,15 +86,15 @@ async function fetchHoldings(walletToSync?: string): Promise<void> {
         if (firstRun) {
             const removal = await clearHoldingsTable();
             if (!removal) {
-                console.log("🚫 Could not clear database holdings");
+                console.log("🚫 Could not remove database holdings. Please remove database manually and try again.");
             }
             firstRun = false;
         }
 
         let wallets = SUBSCRIBE_WALLETS;
         if (walletToSync) {
-            const filteredWallet = wallets.find((w: WalletConfig) => w.address === walletToSync);
-            if (filteredWallet) wallets = [filteredWallet];
+            const filteredWallet = wallets.filter((w) => w.address === walletToSync);
+            if (filteredWallet.length > 0) wallets = filteredWallet;
         }
 
         for (const wallet of wallets) {
@@ -87,138 +103,148 @@ async function fetchHoldings(walletToSync?: string): Promise<void> {
 
         // Update duplicate holdings
         await updateDuplicateHoldings();
+
+        // Show logs
         showLogs();
 
     } catch (error) {
-        logger.error("Error fetching holdings:", error);
-        saveLogTo(actionsLogs, `❌ Error fetching holdings: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.error("Error:", error);
     }
 }
 
 async function processWallet(wallet: WalletConfig): Promise<void> {
+    const walletAddress = wallet.address;
+    const walletName = wallet.name;
+    const walletEmoji = wallet.emoji;
+
+    // Verify if this is a valid walletAddress
+    let publicKey;
     try {
-        // Verify wallet address
-        let publicKey: PublicKey;
-        try {
-            publicKey = new PublicKey(wallet.address);
-        } catch (error) {
-            console.warn(`🚫 Invalid wallet address for ${wallet.name}`);
-            return;
-        }
-
-        // Get token holdings
-        const tokenHoldings: GetWalletTokenHoldingsResponse = await getWalletTokenHoldings(publicKey.toString());
-
-        if (!tokenHoldings.success) {
-            saveLogTo(actionsLogs, `❌ ${wallet.name}: ${tokenHoldings.msg}`);
-            return;
-        }
-
-        // Update display
-        const inspectText = `${config.settings.inspectUrlWallet}${wallet.address}`;
-        holdingLogs.set(
-            wallet.address,
-            `${wallet.name} ${wallet.emoji} (${shortenAddress(wallet.address)}) holds ${tokenHoldings.data.length} SPL-Tokens`
-        );
-
-        // Store in database
-        const stored: SplTokenStoreResponse = await updateHoldings(tokenHoldings.data, publicKey.toString());
-        if (stored.success) {
-            const addedCount = stored.added.length;
-            const removedCount = stored.removed.length;
-
-            if (addedCount > 0 || removedCount > 0) {
-                saveLogTo(actionsLogs, `🔄 ${wallet.name}: +${addedCount} new, -${removedCount} removed`);
-            }
-        } else {
-            saveLogTo(actionsLogs, `⛔ ${wallet.name}: ${stored.msg}`);
-        }
-
+        publicKey = new PublicKey(walletAddress);
     } catch (error) {
-        logger.error(`Error processing wallet ${wallet.name}:`, error);
-        saveLogTo(actionsLogs, `❌ ${wallet.name}: Processing error`);
+        console.log(`🚫 Invalid walletAddress, proceeding with next wallet`);
+        return;
+    }
+
+    // Get all the spl-token holdings for this wallet
+    const tokenHoldings: GetWalletTokenHoldingsResponse = await getWalletTokenHoldings(publicKey.toString());
+
+    // Check if fetching the holdings was successful
+    if (!tokenHoldings.success) {
+        saveLogTo(actionsLogs, tokenHoldings.msg);
+        return;
+    }
+
+    // Store in safe variable
+    const tokenHoldingsData: SplTokenHolding[] = tokenHoldings.data;
+
+    // Copy Trading Detection (NEW FEATURE)
+    if (process.env.COPY_TRADING_ENABLED === 'true') {
+        const detectedTrades = detectTrades(walletAddress, tokenHoldingsData);
+
+        for (const detection of detectedTrades) {
+            if (shouldExecuteCopyTrade(detection, wallet)) {
+                await logCopyTradeOpportunity(detection, wallet);
+                // Here you would add actual trade execution later
+            }
+        }
+    }
+
+    // Output the wallets that we are tracking
+    const inspectText = `\x1b]8;;${config.settings.inspect_url_wallet}${walletAddress}\x1b\\${shortenAddress(walletAddress)}\x1b]8;;\x1b\\`;
+    const copyStatus = wallet.copyEnabled ? ' 🎯' : '';
+    holdingLogs.set(walletAddress, `${walletName} ${walletEmoji}${copyStatus} (${inspectText}) holds ${tokenHoldingsData.length} SPL-Tokens`);
+
+    // Store holdings in local database
+    const stored: SplTokenStoreReponse = await updateHoldings(tokenHoldingsData, publicKey.toString());
+    if (!stored.success) {
+        saveLogTo(actionsLogs, `⛔ Error while storing transfers for wallet ${walletName}: ${stored.msg}`);
+        return;
+    }
+
+    // Log any changes
+    if (stored.added.length > 0 || stored.removed.length > 0) {
+        saveLogTo(actionsLogs, `🔄 ${walletName}: +${stored.added.length} new, -${stored.removed.length} removed tokens`);
     }
 }
 
 async function updateDuplicateHoldings(): Promise<void> {
     try {
-        const duplicateResponse: MintWithOwnersResponse = await getDoubleHoldings();
+        const duplicates: MintWithOwnersResponse = await getDoubleHoldings();
 
-        if (duplicateResponse.success && duplicateResponse.duplicates.length > 0) {
-            duplicateLogs = duplicateResponse.duplicates
-                .slice(0, config.settings.showMaxDuplicates)
-                .map(duplicate => {
-                    if (duplicate.owners.length >= config.settings.showDuplicateMinHolders) {
-                        const shortMint = shortenAddress(duplicate.mint);
-                        const walletEmojis = duplicate.owners
-                            .map(owner => {
-                                const wallet = config.wallets.find((w: WalletConfig) => w.address === owner);
-                                return wallet ? wallet.emoji : '💼';
-                            })
-                            .join(' ');
+        if (duplicates.success && duplicates.duplicates.length > 0) {
+            duplicateLogs = [];
 
-                        return `🔍 Token ${shortMint} (${duplicate.owners.length} 💼): ${walletEmojis} ${config.settings.inspectName}`;
-                    }
-                    return '';
-                })
-                .filter(log => log.length > 0);
+            // Show limited number of duplicates
+            const maxDuplicates = config.settings.show_max_duplicates;
+            const duplicatesToShow = duplicates.duplicates.slice(0, maxDuplicates);
 
-            if (duplicateResponse.duplicates.length > config.settings.showMaxDuplicates) {
-                const remaining = duplicateResponse.duplicates.length - config.settings.showMaxDuplicates;
+            for (const duplicate of duplicatesToShow) {
+                if (duplicate.owners.length >= config.settings.show_duplicate_min_holders) {
+                    const shortMint = shortenAddress(duplicate.mint);
+                    const walletEmojis = duplicate.owners.map(owner => {
+                        const wallet = config.wallets.find(w => w.address === owner);
+                        return wallet ? wallet.emoji : '💼';
+                    }).join(' ');
+
+                    duplicateLogs.push(`🔍 Token ${shortMint} (${duplicate.owners.length} 💼): ${walletEmojis} ${config.settings.inspect_name}`);
+                }
+            }
+
+            if (duplicates.duplicates.length > maxDuplicates) {
+                const remaining = duplicates.duplicates.length - maxDuplicates;
                 duplicateLogs.unshift(`📢 There are ${remaining} more duplicates not shown.`);
             }
         } else {
             duplicateLogs = ['🔍 No duplicate holdings found'];
         }
     } catch (error) {
-        logger.error('Error updating duplicate holdings:', error);
+        console.error('Error updating duplicate holdings:', error);
         duplicateLogs = ['❌ Error checking duplicates'];
     }
 }
 
-// WebSocket handling
-const subscriptions = new Map<number, string>();
+// WebSocket and subscription logic (existing code with minor enhancements)
 const messageQueue: string[] = [];
-let isProcessingQueue = false;
-let ws: WebSocket | null = null;
-let wasClosed = false;
+let processing = false;
+const subscriptions = new Map<number, string>();
 
-async function processQueue(): Promise<void> {
-    if (isProcessingQueue || messageQueue.length === 0) return;
+async function processQueue() {
+    if (processing) return;
+    processing = true;
 
-    isProcessingQueue = true;
-    try {
-        const uniqueWallets = [...new Set(messageQueue)];
-        messageQueue.length = 0;
+    while (messageQueue.length > 0) {
+        const processedMessage = messageQueue.shift();
+        if (processedMessage) {
+            const processedMessageObject = Number(processedMessage);
 
-        for (const walletAddress of uniqueWallets) {
-            const wallet = config.wallets.find((w: WalletConfig) => w.address === walletAddress);
-            if (wallet) {
-                saveLogTo(actionsLogs, `🔄 Change detected: ${wallet.emoji} ${wallet.name}`);
-                await processWallet(wallet);
+            if (subscriptions.has(processedMessageObject)) {
+                const walletAddress = subscriptions.get(processedMessageObject);
+                if (walletAddress) {
+                    const wallet = SUBSCRIBE_WALLETS.find((w) => w.address === walletAddress);
+                    if (wallet) {
+                        saveLogTo(actionsLogs, `🔄 Change detected: ${wallet.emoji} ${wallet.name}`);
+                        await fetchHoldings(wallet.address);
+                    }
+                } else {
+                    await fetchHoldings();
+                }
             }
         }
-
-        await updateDuplicateHoldings();
-        showLogs();
-    } catch (error) {
-        logger.error('Error processing queue:', error);
-    } finally {
-        isProcessingQueue = false;
     }
+
+    processing = false;
 }
 
-function accountSubscribeStream(): void {
-    const wsUri = process.env.HELIUS_WSS_URI || process.env.HELIUS_HTTPS_URI?.replace('https', 'wss') || '';
+// WebSocket connection logic
+let wasClosed = false;
+async function accountSubscribeStream(): Promise<void> {
+    let ws: WebSocket | null = new WebSocket(process.env.HELIUS_WSS_URI || "");
 
-    ws = new WebSocket(wsUri);
+    ws.on("open", () => {
+        saveLogTo(actionsLogs, "🔓 WebSocket open. Proceeding with wallet subscriptions...");
 
-    ws.on('open', () => {
-        wasClosed = false;
-        saveLogTo(actionsLogs, '🔓 WebSocket connected. Subscribing to wallets...');
-
-        // Subscribe to each wallet
-        SUBSCRIBE_WALLETS.forEach((wallet: WalletConfig) => {
+        SUBSCRIBE_WALLETS.forEach((wallet) => {
             const subscriptionMessage = {
                 jsonrpc: "2.0",
                 id: wallet.address,
@@ -227,108 +253,132 @@ function accountSubscribeStream(): void {
                     wallet.address,
                     {
                         encoding: "jsonParsed",
-                        commitment: config.solana?.commitment || "confirmed",
+                        commitment: "confirmed",
                     },
                 ],
             };
-
-            if (ws?.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(subscriptionMessage));
-            }
+            ws!.send(JSON.stringify(subscriptionMessage));
         });
     });
 
-    ws.on('message', async (data: WebSocket.Data) => {
+    ws.on("message", async (data: WebSocket.Data) => {
         try {
             const jsonString = data.toString();
             const accountInfo: getAccountInfoStreamReponseWithConfirmation = JSON.parse(jsonString);
 
-            // Handle subscription confirmation
-            if ('result' in accountInfo && typeof accountInfo.result === 'number' && accountInfo.id) {
-                const walletAddress = accountInfo.id;
+            if (
+                "result" in accountInfo &&
+                typeof accountInfo.result === "number" &&
+                accountInfo.id &&
+                SUBSCRIBE_WALLETS.some((wallet) => wallet.address === accountInfo.id)
+            ) {
+                const getWallet = accountInfo.id;
                 const subscriptionId = accountInfo.result;
-                const wallet = SUBSCRIBE_WALLETS.find((w: WalletConfig) => w.address === walletAddress);
+                const wallet = SUBSCRIBE_WALLETS.find((w) => w.address === getWallet);
 
-                if (wallet && !wasClosed) {
-                    saveLogTo(actionsLogs, `✅ Subscribed to ${wallet.emoji} ${wallet.name}`);
-                    subscriptions.set(subscriptionId, walletAddress);
-                    showLogs();
+                if (!wasClosed) {
+                    saveLogTo(actionsLogs, `✅ Subscribed and listening to websocket stream for ${wallet?.emoji} ${wallet?.name}`);
                 }
+
+                subscriptions.set(subscriptionId, getWallet);
+                showLogs();
                 return;
             }
 
-            // Handle account notifications
-            if (accountInfo.method === 'accountNotification' && accountInfo.params) {
-                const subscriptionId = accountInfo.params.subscription;
-                const walletAddress = subscriptions.get(subscriptionId);
-
-                if (walletAddress) {
-                    messageQueue.push(walletAddress);
-                    processQueue();
-                }
+            if (accountInfo.params?.subscription) {
+                messageQueue.push(accountInfo.params.subscription.toString());
+                processQueue();
             }
-
-        } catch (error) {
-            logger.error('Error processing WebSocket message:', error);
+        } catch (e) {
+            console.error("Error processing message:", e);
         }
     });
 
-    ws.on('error', (err: Error) => {
-        logger.error('🚫 WebSocket error:', err);
-        saveLogTo(actionsLogs, `❌ WebSocket error: ${err.message}`);
+    ws.on("error", (err: Error) => {
+        console.error("🚫 WebSocket error:", err);
     });
 
     let retryCount = 0;
     const maxRetries = 5;
-
-    ws.on('close', () => {
+    ws.on("close", () => {
         wasClosed = true;
-        subscriptions.clear();
-
         console.log(`🔐 WebSocket closed. Reconnecting in ${2 ** retryCount}s...`);
-
         if (retryCount < maxRetries) {
             setTimeout(() => {
                 accountSubscribeStream();
                 retryCount++;
             }, 2 ** retryCount * 1000);
         } else {
-            logger.error('❌ Max retries reached. Exiting...');
+            console.error("Max retries reached. Exiting...");
             process.exit(1);
         }
     });
 }
 
 // Start the application
-async function main(): Promise<void> {
-    try {
-        logger.info('🚀 Starting Solana Wallet Tracker...');
+fetchHoldings()
+    .then(accountSubscribeStream)
+    .catch((err) => {
+        console.error("Initialization error:", err.message);
+        process.exit(1);
+    });
 
-        // Ensure database directory exists
-        const path = require('path');
-        const fs = require('fs');
-        const dbDir = path.dirname(config.database.path);
-        if (!fs.existsSync(dbDir)) {
-            fs.mkdirSync(dbDir, { recursive: true });
+/*
+// Add these imports at the top of src/index.ts
+import { CopyTradingEngine } from './services/CopyTradingEngine';
+import { TradeLogger } from './services/TradeLogger';
+
+// Add after existing imports
+const copyTradingEngine = new CopyTradingEngine();
+
+// Store previous holdings for comparison
+const previousHoldingsMap = new Map<string, SplTokenHolding[]>();
+
+// Update the processWallet function to store previous holdings
+async function processWallet(wallet: WalletConfig): Promise<void> {
+    try {
+        // Get previous holdings for comparison
+        const previousHoldings = previousHoldingsMap.get(wallet.address) || [];
+
+        // ... existing processWallet code ...
+
+        // After successful holdings fetch, check for copy trading opportunities
+        if (wallet.copyEnabled && process.env.COPY_TRADING_ENABLED === 'true') {
+            await copyTradingEngine.processCopyTradeOpportunity(
+                wallet.address,
+                previousHoldings,
+                tokenHoldings.data
+            );
         }
 
-        // Fetch initial holdings
-        await fetchHoldings();
+        // Store current holdings as previous for next comparison
+        previousHoldingsMap.set(wallet.address, tokenHoldings.data);
 
-        // Start WebSocket connection
-        accountSubscribeStream();
-
-        logger.info('✅ Wallet Tracker started successfully');
     } catch (error) {
-        logger.error('❌ Failed to start wallet tracker:', error);
-        process.exit(1);
+        // ... existing error handling ...
     }
 }
 
-// Export for testing
-export { fetchHoldings, processWallet, updateDuplicateHoldings };
-
-// Run if this file is executed directly
-if (require.main === module) {
-    main();
+// Add trade stats to logs display
+async function showTradeStats(): Promise<void> {
+    try {
+        const stats = await TradeLogger.getTradeStats();
+        console.log('\n📊 Copy Trading Stats');
+        console.log('='.repeat(80));
+        console.log(`Total Trades: ${stats.totalTrades}`);
+        console.log(`Success Rate: ${stats.successRate}%`);
+        console.log(`Total Volume: ${stats.totalVolumeSol.toFixed(4)} SOL`);
+        console.log(`Successful: ${stats.successfulTrades} | Failed: ${stats.failedTrades}`);
+    } catch (error) {
+        console.log('📊 Trade stats unavailable');
+    }
 }
+
+// Update showLogs function to include trade stats
+function showLogs() {
+    // ... existing showLogs code ...
+
+    // Add trade stats at the end
+    showTradeStats();
+}
+*/

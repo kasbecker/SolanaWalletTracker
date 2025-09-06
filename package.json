@@ -6,10 +6,14 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:tracker": "ts-node src/index.ts",
     "dev": "ts-node src/index.ts",
     "test": "ts-node src/test.ts",
     "clean": "rm -rf dist",
     "db:setup": "mkdir -p src/db && touch src/db/holdings.db",
+    "view-trades": "node scripts/view-trades.js",
+    "trade-stats": "node -e \"require('./dist/services/TradeLogger').TradeLogger.getTradeStats().then(console.log)\"",
+    "copy-trade": "COPY_TRADING_ENABLED=true npm run start:tracker",
     "lint": "eslint src/**/*.ts --fix"
   },
   "keywords": [
