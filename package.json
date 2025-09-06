@@ -1,23 +1,39 @@
 {
   "name": "solana_wallet_tracker",
   "version": "1.0.0",
+  "description": "Solana wallet tracker with real-time monitoring",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/core/index.ts",
     "build": "tsc",
-    "start": "node dist/core/index.js",
-    "start:api": "node dist/api/server.js",
-    "test": "jest",
-    "db:migrate": "node dist/database/migrations/run.js",
-    "copy-trade": "node dist/services/TradingEngine.js"
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "ts-node src/test.ts",
+    "clean": "rm -rf dist",
+    "db:setup": "mkdir -p src/db && touch src/db/holdings.db",
+    "lint": "eslint src/**/*.ts --fix"
   },
-  "keywords": [],
+  "keywords": [
+    "solana",
+    "wallet",
+    "tracker",
+    "crypto"
+  ],
   "author": "https://x.com/digbenjamins",
   "license": "ISC",
-  "description": "",
+  "dependencies": {
+    "@project-serum/anchor": "^0.26.0",
+    "@solana/web3.js": "^1.95.5",
+    "axios": "^1.7.8",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "luxon": "^3.5.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "ws": "^8.18.0"
+  },
   "devDependencies": {
     "@types/luxon": "^3.4.2",
-    "@types/node": "^22.10.1",
+    "@types/node": "^22.18.1",
     "@types/ws": "^8.5.13",
     "eslint": "^9.15.0",
     "globals": "^15.12.0",
@@ -25,16 +41,8 @@
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.16.0"
   },
-  "dependencies": {
-    "@project-serum/anchor": "^0.26.0",
-    "@solana/web3.js": "^1.95.5",
-    "axios": "^1.11.0",
-    "bs58": "^6.0.0",
-    "dotenv": "^16.4.5",
-    "luxon": "^3.5.0",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
-    "winston": "^3.17.0",
-    "ws": "^8.18.0"
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   }
 }
